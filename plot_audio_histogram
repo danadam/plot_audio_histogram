@@ -1,0 +1,227 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+log() {
+    echo "$(date +%T) $(basename "${0}"): ${1:-log() argument missing}"
+}
+log_err() {
+    log "${1:-log_err() argument missing}" >&2
+}
+die() {
+    log_err "${1-die() argument missing}"
+    exit 1
+}
+die_usage() {
+    log_err "${1-die() argument missing}"
+    usage
+    exit 1
+}
+usage() {
+    cat << EOF
+Usage:
+  $(basename "${0}") -i INPUT_FILE [optional arguments]
+
+  Required:
+    -i | --input INPUT_FILE     - input file
+
+  Optional:
+    -o | --output OUTPUT_FILE   - output file (default is same as input with
+                                  the extension changed to "png")
+    -F | --force                - force overwrite output file
+
+    -t | --title TITLE          - title (default is "artist / album / title" or
+                                  the filename if metadata is not available)
+    -s | --size SIZE            - size (default is 1000x500)
+
+    -h | --help                 - this help message
+
+The script calls audio_histogram to generate sample and rms histogram data and
+plots it to PNG file using gnuplot.
+
+Metadata for the title is read using ffmpeg if it is available.
+EOF
+}
+declare -ra required_cmds=(cp mv ls sed gnuplot)
+for cmd in "${required_cmds[@]}"; do
+    if ! which "${cmd}" >/dev/null 2>&1; then
+        log "Required tools: ${required_cmds[*]}"
+        die "Required tool not found: ${cmd}"
+    fi
+done
+
+input_file=""
+output_file=""
+force_overwrite="no"
+title=""
+size="1000x500"
+
+while [ -n "${1-}" ]; do
+    case "${1}" in
+        -i|--input| \
+        -o|--output| \
+        -t|--title| \
+        -s|--size)
+            if [ ! $# -ge 2 ]; then
+                die_usage "Argument missing for option ${1}"
+            fi
+        ;;
+    esac
+    case "${1}" in
+        -i|--input)
+            input_file="${2}"
+            shift
+        ;;
+        -o|--output)
+            output_file="${2}"
+            shift
+        ;;
+        -F|--force)
+            force_overwrite="yes"
+        ;;
+        -t|--title)
+            title="${2}"
+            shift
+        ;;
+        -s|--size)
+            size="${2}"
+            shift
+        ;;
+        -h|--help)
+            usage
+            exit 0
+        ;;
+        *)
+            break
+        ;;
+    esac
+    shift
+done
+
+if [ -z "${input_file}" ]; then
+    die_usage "Input file is required."
+fi
+if [ ! -f "${input_file}" ]; then
+    die "File ${input_file} doesn't exist."
+fi
+if [ -z "${output_file}" ]; then
+    output_file="${input_file%.*}.png"
+fi
+if [ -f "${output_file}" ] && [ "${force_overwrite}" != "yes" ]; then
+    die "File ${output_file} already exists. Use -F | --force to overwrite."
+fi
+
+
+
+size_regex="^[0-9]+x[0-9]+$"
+if [[ "${size}" =~ ${size_regex} ]]; then
+    width="$(echo "${size}" | cut -d'x' -f1)"
+    height="$(echo "${size}" | cut -d'x' -f2)"
+else
+    die_usage "Wrong size format: ${size}"
+fi
+
+
+
+declare -r script_path="$(readlink -f "${0}")"
+declare -r script_dir="${script_path%/*}"
+
+declare -r tmp_dir=$(mktemp -d)
+trap 'rm -rf "${tmp_dir}"' EXIT
+
+
+
+declare -i has_ffmpeg=0
+if which "${cmd}" >/dev/null 2>&1; then
+    has_ffmpeg=1
+fi
+declare -r metadata_file="${tmp_dir}/metadata.txt"
+read_metadata() {
+    local tag="${1}"
+    grep -i "^${tag}=" "${metadata_file}" | cut -d'=' -f2- || true
+}
+if [ -z "${title}" ] && (( has_ffmpeg )); then
+    ffmpeg -loglevel error -y -i "${input_file}" -f ffmetadata "${metadata_file}"
+    title="$(read_metadata "title")"
+    if [ -z "${title}" ]; then
+        title="${input_file##*/}"
+    else
+        track="$(read_metadata "track")"
+        if [ -n "${track}" ]; then
+            title="${track}. ${title}"
+            disc="$(read_metadata "disc")"
+            if [ -n "${disc}" ]; then
+                title="${disc}-${title}"
+            fi
+        fi
+        album="$(read_metadata "album")"
+        artist="$(read_metadata "artist")"
+
+        title="${artist:-unknown} / ${album:-unknown} / ${title}"
+    fi
+    log "Title will be: ${title}"
+fi
+
+
+
+declare -r hist_dat_file="${tmp_dir}/hist.txt"
+"${script_dir}/audio_histogram" -i "${input_file}" -o "${hist_dat_file}"
+
+declare -r hist_gp_file="${tmp_dir}/hist.gp"
+cat >"${hist_gp_file}" <<'EOF'
+reset
+set terminal pngcairo truecolor size T_WIDTH, T_HEIGHT
+
+# remove border on top and right and set color to gray
+set style line 11 lc rgb 'black' lt 1
+set border 9 back ls 11
+set tics nomirror
+
+# define grid
+set style line 12 lc rgb '#303030' lt 0 lw 1
+set grid back ls 12
+
+# define lines
+
+set output "T_OUT"
+set style data histeps
+
+unset ytics
+set y2tics nomirror
+set rmargin 5.5
+
+set xtics 10
+set mxtics
+
+set xlabel "dBFS"
+
+set key bmargin center
+set key Left reverse maxrows 1 width 2
+set bmargin 5
+
+set title "T_TITLE" noenhanced
+
+set xrange [-140.5:1.5]
+plot \
+  'T_DAT_FILE' using 1:2 axes x1y2 title 'sample\_L' linetype rgb '#c71586' lw 2, \
+  'T_DAT_FILE' using 1:4 axes x1y2 title 'sample\_R' linetype rgb '#c77993' lw 2, \
+  'T_DAT_FILE' using 1:3 axes x1y2 title 'rms\_L' linetype rgb '#1352dc' lw 2, \
+  'T_DAT_FILE' using 1:5 axes x1y2 title 'rms\_R' linetype rgb '#90b2ed' lw 2
+EOF
+
+sanitize_for_sed() {
+    # escape / and & so that sed doesn't complain
+    # double escape " so that it is still escaped once in the gp file
+    echo "${1}" | sed 's/[/&]/\\&/g' | sed 's/"/\\\\"/g'
+}
+
+sed -i \
+    -e "s/T_WIDTH/${width}/g" \
+    -e "s/T_HEIGHT/${height}/g" \
+	-e "s/T_TITLE/$(sanitize_for_sed "${title}")/" \
+    -e "s/T_OUT/$(sanitize_for_sed "${output_file}")/" \
+    -e "s/T_DAT_FILE/$(sanitize_for_sed "${hist_dat_file}")/" \
+    "${hist_gp_file}"
+
+gnuplot "${hist_gp_file}"
+
+log 'THE END'
