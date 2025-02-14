@@ -215,8 +215,8 @@ main(int argc, char * argv[]) {
         die(g_progname, "can't open %s for writing", opts.output_path);
     }
 
-    SignalT content1; content1.resize(sfinfo1.channels * sfinfo1.frames);
-    int nread = sf_read_double(sndfile1.get(), &content1[0], content1.size());
+    SignalT content_all; content_all.resize(sfinfo1.channels * sfinfo1.frames);
+    int nread = sf_read_double(sndfile1.get(), &content_all[0], content_all.size());
     if (nread <= 0) {
         die(g_progname, "no audio read from %s", opts.input_path);
     }
@@ -237,7 +237,7 @@ main(int argc, char * argv[]) {
     for (int ch = 0; ch < num_of_ch; ch++) {
         SignalT content; content.resize(nread / num_of_ch);
         for (size_t i = 0; i < content.size(); i++) {
-            content[i] = content1[i * num_of_ch + ch];
+            content[i] = content_all[i * num_of_ch + ch];
         }
         auto num_of_zeros = std::count(begin(content), end(content), 0.0);
         printf("ch %d has %ld zeros\n", ch, num_of_zeros);
