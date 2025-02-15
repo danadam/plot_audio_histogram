@@ -1,0 +1,4 @@
+audio_histogram
+*.d
+*.o
+*.sym
